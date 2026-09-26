@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>公交刷卡票价核验台</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>🚌 公交刷卡票价核验台</h1>
+    <div class="top-actions">
+      <button id="btn-demo" class="btn btn-ghost" type="button">载入演示数据</button>
+      <button id="btn-verify-top" class="btn btn-primary" type="button">▶ 运行核验</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="toast" class="toast" hidden></div>
+
+    <!-- 规则参数 -->
+    <section class="card" id="sec-config">
+      <h2>1. 规则参数</h2>
+      <div class="form-grid">
+        <label>运营日分界时刻（点）
+          <input type="number" id="cfg-split" min="0" max="23" />
+        </label>
+        <label>换乘有效间隔（分钟）
+          <input type="number" id="cfg-minutes" min="1" />
+        </label>
+        <label>换乘抵扣额（元）
+          <input type="number" id="cfg-discount" min="0" step="0.01" />
+        </label>
+        <label>每卡每日封顶额（元）
+          <input type="number" id="cfg-cap" min="0" step="0.01" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-save" id="btn-save-config" type="button">保存参数</button>
+        <span class="hint">行程按「进站时刻」归属运营日，如 03:30 的进站归入前一日。</span>
+      </div>
+    </section>
+
+    <!-- 规则试算对比 -->
+    <section class="card" id="sec-trial">
+      <h2>2. 规则试算对比</h2>
+      <p class="hint">输入一组<strong>不会被保存</strong>的草案参数，系统对当前已保存的同一批刷卡记录，
+        分别按「当前配置」与「草案配置」计费。试算与正式核验共用同一套解析、配对与计价规则，
+        <strong>不修改配置、不写入账单</strong>；任一方案存在数据错误时，返回该方案的原有定位错误。</p>
+      <div class="form-grid">
+        <label>草案：运营日分界时刻（点）
+          <input type="number" id="trial-split" min="0" max="23" />
+        </label>
+        <label>草案：换乘有效间隔（分钟）
+          <input type="number" id="trial-minutes" min="1" />
+        </label>
+        <label>草案：换乘抵扣额（元）
+          <input type="number" id="trial-discount" min="0" step="0.01" />
+        </label>
+        <label>草案：每卡每日封顶额（元）
+          <input type="number" id="trial-cap" min="0" step="0.01" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-run-trial" type="button">🧪 当前配置 vs 草案 试算</button>
+        <button class="btn btn-ghost" id="btn-trial-copy" type="button">用已保存参数填入草案</button>
+        <span id="trial-status" class="status"></span>
+      </div>
+
+      <div id="trial-errors" class="errors-panel" hidden>
+        <h3>❌ 试算未通过 —— 对应方案的原有定位错误如下（配置未改动、账单未写入）</h3>
+        <div id="trial-err-current" class="trial-err-block" hidden>
+          <h4>当前配置方案</h4>
+          <ul></ul>
+        </div>
+        <div id="trial-err-draft" class="trial-err-block" hidden>
+          <h4>草案配置方案</h4>
+          <ul></ul>
+        </div>
+      </div>
+
+      <div id="trial-result" class="trial-result" hidden>
+        <h3>试算对比 <span class="hint">（差额 = 草案 − 当前，正数红色表示多付）</span></h3>
+        <div id="trial-params" class="trial-params"></div>
+        <div id="trial-batch" class="trial-batch"></div>
+        <div class="table-wrap">
+          <table id="trial-table">
+            <thead>
+              <tr>
+                <th>卡号</th><th>#</th><th>行程</th>
+                <th>运营日(当前)</th><th>运营日(草案)</th>
+                <th>优惠(当前)</th><th>优惠(草案)</th><th>优惠差额</th>
+                <th>实扣(当前)</th><th>实扣(草案)</th><th>实扣差额</th>
+                <th>草案优惠说明</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <h3>按卡汇总</h3>
+        <div class="table-wrap">
+          <table id="trial-cards-table">
+            <thead>
+              <tr>
+                <th>卡号</th><th>行程数</th>
+                <th>实扣合计(当前)</th><th>实扣合计(草案)</th><th>实扣差额</th>
+                <th>优惠合计(当前)</th><th>优惠合计(草案)</th><th>优惠差额</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 站点分区 -->
+    <section class="card" id="sec-stations">
+      <h2>3. 站点分区</h2>
+      <p class="hint">每行一条：<code>站点名, 分区号</code>，例如 <code>科技园, 1</code></p>
+      <textarea id="stations-text" rows="6" placeholder="科技园, 1
+中心公园, 2
+大学城, 3"></textarea>
+      <div class="row-actions">
+        <button class="btn btn-save" id="btn-save-stations" type="button">保存站点</button>
+        <button class="btn btn-ghost" id="btn-load-stations" type="button">从已存数据回填</button>
+      </div>
+      <div class="table-wrap">
+        <table id="stations-table">
+          <thead><tr><th>站点</th><th>分区</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 票价矩阵 -->
+    <section class="card" id="sec-fares">
+      <h2>4. 票价矩阵</h2>
+      <p class="hint">每行一条：<code>起始分区, 到达分区, 票价</code>，按行程方向精确匹配。</p>
+      <div class="row-actions compact">
+        <button class="btn btn-ghost" id="btn-gen-fares" type="button">生成对称矩阵模板（分区数）</button>
+        <input type="number" id="fare-zones" min="1" max="20" value="3" class="mini-input" />
+      </div>
+      <textarea id="fares-text" rows="7" placeholder="1, 1, 2.00
+1, 2, 3.00"></textarea>
+      <div class="row-actions">
+        <button class="btn btn-save" id="btn-save-fares" type="button">保存票价矩阵</button>
+        <button class="btn btn-ghost" id="btn-load-fares" type="button">从已存数据回填</button>
+      </div>
+      <div class="table-wrap">
+        <table id="fares-table">
+          <thead><tr><th>起始分区</th><th>到达分区</th><th>票价（元）</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 刷卡记录 -->
+    <section class="card" id="sec-records">
+      <h2>5. 刷卡记录</h2>
+      <p class="hint">每行一条：<code>卡号, 时刻, 站点, 进/出</code>。方向支持 <code>IN/进</code> 与 <code>OUT/出</code>。
+        时刻示例 <code>2026-09-18 08:00:00</code>，也支持 <code>2026/09/18 08:00</code>。</p>
+      <textarea id="records-text" rows="9" placeholder="A001, 2026-09-18 08:00:00, 科技园, 进
+A001, 2026-09-18 08:25:00, 中心公园, 出"></textarea>
+      <div class="row-actions">
+        <button class="btn btn-save" id="btn-save-records" type="button">保存记录</button>
+        <button class="btn btn-ghost" id="btn-load-records" type="button">从已存数据回填</button>
+      </div>
+      <div class="table-wrap">
+        <table id="records-table">
+          <thead><tr><th>卡号</th><th>时刻</th><th>站点</th><th>方向</th><th>来源行</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 配对修复预览 -->
+    <section class="card" id="sec-repair">
+      <h2>6. 配对修复预览</h2>
+      <p class="hint">针对<strong>已保存</strong>的刷卡记录，仅处理缺失进站、缺失出站与连续同向刷卡：
+        按卡号和时间排序后做全局最小编辑搜索，编辑仅限<strong>翻转进/出方向</strong>或<strong>删除记录</strong>，
+        原始时刻与站点不会被改写。存在多个同成本方案时按稳定顺序最多展示 5 个并标明未展示数量，
+        系统不会替您选定。预览<strong>全程只读</strong>：不保存记录、不清空账单；
+        未知站点、缺票价等非配对错误仍按原错误返回。</p>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-repair" type="button">🛠 生成修复预览</button>
+        <span id="repair-status" class="status"></span>
+      </div>
+
+      <div id="repair-errors" class="errors-panel" hidden>
+        <h3>❌ 无法生成修复方案 —— 存在非配对错误，请先在下方核验区处理（记录与账单均未改动）</h3>
+        <ul id="repair-errors-list"></ul>
+      </div>
+
+      <div id="repair-result" class="repair-result" hidden>
+        <div id="repair-summary" class="repair-summary"></div>
+        <div id="repair-plans"></div>
+      </div>
+    </section>
+
+    <!-- 核验结果 -->
+    <section class="card" id="sec-result">
+      <h2>7. 核验结果</h2>
+      <div class="row-actions">
+        <button class="btn btn-primary big" id="btn-verify" type="button">▶ 运行核验</button>
+        <span id="verify-status" class="status"></span>
+      </div>
+
+      <div id="errors-panel" class="errors-panel" hidden>
+        <h3>❌ 核验未通过 —— 已定位以下问题，本次未生成任何账单（无部分账单）</h3>
+        <ul id="errors-list"></ul>
+      </div>
+
+      <div id="bills-panel" class="bills-panel" hidden>
+        <h3>✅ 行程账单</h3>
+        <div class="table-wrap">
+          <table id="bills-table">
+            <thead>
+              <tr>
+                <th>卡号</th><th>#</th><th>运营日</th>
+                <th>进站时刻</th><th>出站时刻</th>
+                <th>进站(区)</th><th>出站(区)</th>
+                <th>基础票价</th><th>优惠</th><th>实扣</th>
+                <th>当日累计</th><th>优惠来源/说明</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 票价矩阵路径审计 -->
+    <section class="card" id="sec-fare-audit">
+      <h2>8. 票价矩阵路径审计</h2>
+      <p class="hint">以分区为节点、已配置的有向票价为边，对<strong>已保存</strong>刷卡记录配对出的
+        实际行程分区对计算最低成本路径：缺直达票价但可达时给出<strong>建议票价、完整路径</strong>
+        及受影响卡号与原始行号；已有直达票价高于间接路径时标出差额；不可达的分区对保留
+        <code>MISSING_FARE</code>。相同总价按分区序列稳定选路，零价边与非对称方向均按有向图语义处理。
+        审计<strong>全程只读</strong>：不修改票价矩阵、不写入或清空账单；建议补录行需人工核对后
+        粘贴到「4. 票价矩阵」保存。</p>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-fare-audit" type="button">🧭 运行路径审计</button>
+        <button class="btn btn-ghost" id="btn-copy-suggests" type="button" hidden>📋 复制全部建议补录行</button>
+        <span id="audit-status" class="status"></span>
+      </div>
+
+      <div id="audit-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行路径审计 —— 存在以下数据错误，请先修复（矩阵与账单均未改动）</h3>
+        <ul id="audit-errors-list"></ul>
+      </div>
+
+      <div id="audit-result" class="audit-result" hidden>
+        <div id="audit-summary" class="audit-summary"></div>
+
+        <div id="audit-missing-block" hidden>
+          <h3>缺直达票价的分区对</h3>
+          <div class="table-wrap">
+            <table id="audit-missing-table">
+              <thead>
+                <tr>
+                  <th>分区对</th><th>状态</th><th>建议票价</th>
+                  <th>最低成本路径（完整路径）</th>
+                  <th>受影响行程（卡号 / 原始行号）</th><th>建议补录行</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="audit-overpriced-block" hidden>
+          <h3>直达票价高于间接路径的分区对</h3>
+          <div class="table-wrap">
+            <table id="audit-overpriced-table">
+              <thead>
+                <tr>
+                  <th>分区对</th><th>直达票价</th><th>间接最低</th><th>差额</th>
+                  <th>最低成本路径（完整路径）</th>
+                  <th>受影响行程（卡号 / 原始行号）</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 行程耗时异常审计 -->
+    <section class="card" id="sec-duration-audit">
+      <h2>9. 行程耗时异常审计</h2>
+      <p class="hint">对<strong>已保存</strong>且可完整配对的刷卡记录，按「进站站点 → 出站站点」的
+        <strong>有向站点对</strong>分组，行程耗时 = 出站时刻 − 进站时刻。仅当站点对样本数
+        <strong>≥ 6 程</strong>时参与判定：每条行程先从基线中<strong>排除自身</strong>，以其余样本的
+        中位数与 MAD（中位绝对偏差）计算阈值 <code>max(10 分钟, 3 × 1.4826 × MAD)</code>，
+        绝对偏差<strong>严格大于</strong>阈值时标记为「过长」或「过短」；样本不足的站点对单独列出、
+        不参与判定。未知站点与票价缺项<strong>不阻断</strong>审计；缺失进出站、时间逆序、重复刷卡等
+        配对 / 时间类错误仍按原有定位错误返回。审计<strong>全程只读</strong>：不修改记录、配置或账单。</p>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-duration-audit" type="button">⏱ 运行耗时审计</button>
+        <span id="duration-status" class="status"></span>
+      </div>
+
+      <div id="duration-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行耗时审计 —— 存在配对 / 时间类数据错误，请先修复（记录、配置与账单均未改动）</h3>
+        <ul id="duration-errors-list"></ul>
+      </div>
+
+      <div id="duration-result" class="audit-result" hidden>
+        <div id="duration-summary" class="audit-summary"></div>
+
+        <div id="duration-anomalies-block" hidden>
+          <h3>耗时异常行程</h3>
+          <div class="table-wrap">
+            <table id="duration-anomalies-table">
+              <thead>
+                <tr>
+                  <th>判定</th><th>卡号</th><th>#</th><th>站点对</th>
+                  <th>进站时刻</th><th>出站时刻</th><th>耗时(分)</th>
+                  <th>基线样本数</th><th>中位数(分)</th><th>MAD(分)</th>
+                  <th>阈值(分)</th><th>偏差(分)</th><th>原始行号</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="duration-insufficient-block" hidden>
+          <h3>样本不足的站点对（不参与判定）</h3>
+          <div class="table-wrap">
+            <table id="duration-insufficient-table">
+              <thead>
+                <tr><th>站点对</th><th>样本数</th><th>说明</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 站点闸机峰值审计 -->
+    <section class="card" id="sec-peak-audit">
+      <h2>10. 站点闸机峰值审计</h2>
+      <p class="hint">直接统计<strong>已保存</strong>的刷卡记录（与配对 / 票价 / 配置无关）：按
+        <strong>站点 × 进/出方向</strong>分组，在给定的 <strong>1～120 分钟</strong>窗口内查找刷卡数最多的
+        <strong>半开区间 [开始, 结束)</strong>。候选窗口只从<strong>实际刷卡时刻</strong>起算，
+        不做固定整点分桶，因此不会漏掉跨整点边界的高峰；峰值数量并列时依次按更早开始时刻、站点名排序。
+        每组给出峰值刷卡数、窗口起止时刻、<strong>涉及卡号数</strong>与<strong>原始行号</strong>；
+        设置最低告警数后仅标记达标的组（行高亮 + 🚨）。审计<strong>全程只读</strong>：
+        不修改记录、配置或账单。</p>
+      <div class="form-grid">
+        <label>统计窗口（分钟，1～120）
+          <input type="number" id="peak-window" min="1" max="120" value="15" />
+        </label>
+        <label>最低告警数（峰值达到该值才标记）
+          <input type="number" id="peak-min-alert" min="1" value="1" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-peak-audit" type="button">🚇 运行峰值审计</button>
+        <span id="peak-status" class="status"></span>
+      </div>
+
+      <div id="peak-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行峰值审计 —— 参数不合法（记录、配置与账单均未改动）</h3>
+        <ul id="peak-errors-list"></ul>
+      </div>
+
+      <div id="peak-result" class="audit-result" hidden>
+        <div id="peak-summary" class="audit-summary"></div>
+
+        <div class="table-wrap">
+          <table id="peak-table">
+            <thead>
+              <tr>
+                <th>告警</th><th>站点</th><th>方向</th>
+                <th>峰值刷卡数</th><th>涉及卡号数</th>
+                <th>窗口开始</th><th>窗口结束（不含）</th>
+                <th>组内总刷卡数</th><th>窗口内原始行号（点击定位）</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 外部刷卡批次合并预览 -->
+    <section class="card" id="sec-merge">
+      <h2>11. 外部刷卡批次合并预览</h2>
+      <p class="hint">粘贴一批<strong>待导入</strong>的刷卡记录（格式与「5. 刷卡记录」一致），系统以
+        <strong>已保存记录为基准</strong>做只读合并预览：仅当两条记录的<strong>卡号、站点、进/出方向相同</strong>
+        且时间差不超过容差（<strong>0～120 秒</strong>）时视为候选重复；按（卡号, 站点, 方向）分组做
+        <strong>全局一对一匹配</strong>——先最大化配对数，再最小化配对的总时间差，完全同分时以基准行号、
+        导入行号稳定破同分。返回<strong>重复配对、仅基准 / 仅导入记录</strong>与去重后<strong>按时间排序的合并文本</strong>。
+        预览<strong>全程只读</strong>：不保存待导入记录、不修改已保存记录或账单。</p>
+      <textarea id="merge-text" rows="8" placeholder="A001, 2026-09-18 08:00:03, 科技园, 进
+X999, 2026-09-18 08:10:00, 中心公园, 进"></textarea>
+      <div class="form-grid">
+        <label>时间容差（秒，0～120）
+          <input type="number" id="merge-tolerance" min="0" max="120" value="30" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-merge" type="button">🔗 生成合并预览</button>
+        <span id="merge-status" class="status"></span>
+      </div>
+
+      <div id="merge-errors" class="errors-panel" hidden>
+        <h3>❌ 无法生成合并预览 —— 待导入记录存在以下解析错误（已保存记录与账单均未改动）</h3>
+        <ul id="merge-errors-list"></ul>
+      </div>
+
+      <div id="merge-result" class="audit-result" hidden>
+        <div id="merge-summary" class="audit-summary"></div>
+
+        <div id="merge-pairs-block" hidden>
+          <h3>重复配对（基准 ↔ 待导入）</h3>
+          <div class="table-wrap">
+            <table id="merge-pairs-table">
+              <thead>
+                <tr>
+                  <th>卡号</th><th>站点</th><th>方向</th>
+                  <th>基准时刻（行号）</th><th>导入时刻（行号）</th>
+                  <th>时间差(秒)</th><th>导入 − 基准</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="merge-base-only-block" hidden>
+          <h3>仅基准记录（已保存、待导入批次中无重复）</h3>
+          <div class="table-wrap">
+            <table id="merge-base-only-table">
+              <thead>
+                <tr><th>卡号</th><th>时刻</th><th>站点</th><th>方向</th><th>基准行号</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="merge-import-only-block" hidden>
+          <h3>仅导入记录（待导入批次中的新增记录）</h3>
+          <div class="table-wrap">
+            <table id="merge-import-only-table">
+              <thead>
+                <tr><th>卡号</th><th>时刻</th><th>站点</th><th>方向</th><th>导入行号</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <h3>合并文本（去重后按时间排序，配对取基准行）</h3>
+        <div class="row-actions compact">
+          <button class="btn btn-ghost" id="btn-merge-copy" type="button">📋 复制合并文本</button>
+          <span class="hint">复制后可人工核对；预览不会把它写入「5. 刷卡记录」。</span>
+        </div>
+        <pre id="merge-merged-text" class="fixed-text"></pre>
+      </div>
+    </section>
+
+    <!-- 匿名客流 OD 发布 -->
+    <section class="card" id="sec-od-publish">
+      <h2>12. 匿名客流 OD 发布</h2>
+      <p class="hint">仅从<strong>已保存且可完整配对</strong>的记录生成「进站 → 出站」聚合：选择运营日起止、
+        <strong>15 / 30 / 60 分钟</strong>初始时间桶与匿名阈值 <strong>k（2～50）</strong>。
+        每个运营日、每个 OD 内以<strong>去重卡数</strong>判定；低于 k 的非空桶会反复与前后相邻非空桶合并
+        （优先合并后跨度更小者，同分选更早邻桶），<strong>禁止跨运营日或跨 OD 合并</strong>；
+        已无邻桶仍不足 k 的桶一律<strong>抑制</strong>，抑制项只报数量。
+        发布结果只含<strong>最终区间、行程数与去重卡数</strong>，不含卡号、原始行号或单条时刻。
+        配对 / 时间类错误沿用原有定位错误且不产出报表。发布<strong>全程只读</strong>：
+        不修改记录、配置或账单。</p>
+      <div class="form-grid">
+        <label>运营日起始日期（含）
+          <input type="date" id="od-start" />
+        </label>
+        <label>运营日结束日期（含）
+          <input type="date" id="od-end" />
+        </label>
+        <label>初始时间桶（分钟）
+          <select id="od-bucket">
+            <option value="15" selected>15 分钟</option>
+            <option value="30">30 分钟</option>
+            <option value="60">60 分钟</option>
+          </select>
+        </label>
+        <label>匿名阈值 k（去重卡数下限，2～50）
+          <input type="number" id="od-k" min="2" max="50" value="2" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-od-publish" type="button">📊 生成匿名 OD 发布</button>
+        <button class="btn btn-ghost" id="btn-od-csv" type="button" hidden>⬇ 导出 CSV</button>
+        <span id="od-status" class="status"></span>
+      </div>
+
+      <div id="od-errors" class="errors-panel" hidden>
+        <h3>❌ 无法生成 OD 发布 —— 存在配对 / 时间类数据错误或参数不合法（记录、配置与账单均未改动）</h3>
+        <ul id="od-errors-list"></ul>
+      </div>
+
+      <div id="od-result" class="audit-result" hidden>
+        <div id="od-summary" class="audit-summary"></div>
+
+        <div class="table-wrap">
+          <table id="od-table">
+            <thead>
+              <tr>
+                <th>运营日</th><th>进站站点</th><th>出站站点</th>
+                <th>区间开始</th><th>区间结束（不含）</th>
+                <th>区间跨度(分)</th><th>合并桶数</th>
+                <th>行程数</th><th>去重卡数</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 闸机容量排队推演 -->
+    <section class="card" id="sec-gate-queue">
+      <h2>13. 闸机容量排队推演</h2>
+      <p class="hint">直接统计<strong>已保存</strong>的刷卡记录（与配对 / 站点分区 / 票价无关，
+        配对、未知站点、票价错误均不阻断）：选择<strong>运营日</strong>与
+        <strong>1 / 5 / 15 分钟</strong>时间桶，设置<strong>每桶通行能力</strong>与
+        <strong>最多续算桶数</strong>。时间桶从<strong>运营日分界时刻</strong>起按桶长对齐
+        （半开区间 [开始, 结束)），按<strong>站点 × 进/出方向</strong>统计每桶刷卡到达量，
+        逐桶递推 <code>处理量 = min(期初积压 + 到达量, 容量)</code>，未处理量结转下一桶；
+        最后一笔到达之后继续以<strong>零到达空桶</strong>消化积压，达到续算上限仍未清空则
+        <strong>标记未清</strong>。结果给出逐桶到达 / 处理 / 期末积压，以及
+        <strong>峰值积压、首次超载、清空时刻</strong>，支持 CSV 导出。
+        推演<strong>全程只读</strong>：不修改记录、配置或账单。</p>
+      <div class="form-grid">
+        <label>运营日
+          <input type="date" id="gq-day" />
+        </label>
+        <label>时间桶（分钟）
+          <select id="gq-bucket">
+            <option value="1">1 分钟</option>
+            <option value="5" selected>5 分钟</option>
+            <option value="15">15 分钟</option>
+          </select>
+        </label>
+        <label>每桶通行能力（人次，≥1）
+          <input type="number" id="gq-capacity" min="1" step="1" value="2" />
+        </label>
+        <label>最多续算空桶数（≥0）
+          <input type="number" id="gq-extra" min="0" step="1" value="30" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-gate-queue" type="button">🚪 运行排队推演</button>
+        <button class="btn btn-ghost" id="btn-gq-csv" type="button" hidden>⬇ 导出 CSV</button>
+        <span id="gq-status" class="status"></span>
+      </div>
+
+      <div id="gq-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行排队推演 —— 参数不合法（记录、配置与账单均未改动）</h3>
+        <ul id="gq-errors-list"></ul>
+      </div>
+
+      <div id="gq-result" class="audit-result" hidden>
+        <div id="gq-summary" class="audit-summary"></div>
+        <div id="gq-groups"></div>
+      </div>
+    </section>
+
+    <!-- 通票购买策略回测 -->
+    <section class="card" id="sec-pass">
+      <h2>14. 通票购买策略回测</h2>
+      <p class="hint">基于<strong>最近一次核验生成的账单</strong>（第 7 区），按卡号比较
+        「按次实扣」与「购买通票」：每行一种通票 <code>名称, 价格, 连续有效运营日数</code>，
+        并选择运营日起止（闭区间）。通票自选定运营日起<strong>连续覆盖</strong>其有效运营日内的
+        全部行程，<strong>不因中间无行程暂停</strong>。系统用<strong>动态规划</strong>求每张卡
+        总支出最低的购买序列，同价时依次选择<strong>通票更少、首次购买日更早、名称字典序更小</strong>
+        的方案。回测<strong>全程只读</strong>：不修改记录、配置或账单；尚未成功核验（无有效账单）时
+        无法回测。</p>
+      <textarea id="pass-text" rows="4" placeholder="一日票, 6.00, 1
+三日票, 15.00, 3
+周票, 30.00, 7"></textarea>
+      <div class="form-grid">
+        <label>运营日起始日期（含）
+          <input type="date" id="pass-start" />
+        </label>
+        <label>运营日结束日期（含）
+          <input type="date" id="pass-end" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-pass" type="button">🎫 运行通票回测</button>
+        <span id="pass-status" class="status"></span>
+      </div>
+
+      <div id="pass-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行通票回测 —— 请先处理以下问题（记录、配置与账单均未改动）</h3>
+        <ul id="pass-errors-list"></ul>
+      </div>
+
+      <div id="pass-result" class="audit-result" hidden>
+        <div id="pass-summary" class="audit-summary"></div>
+
+        <h3>按卡汇总</h3>
+        <div class="table-wrap">
+          <table id="pass-cards-table">
+            <thead>
+              <tr>
+                <th>卡号</th><th>行程数</th><th>基准支出（按次实扣）</th>
+                <th>通票费</th><th>未覆盖按次</th><th>通票方案支出</th>
+                <th>节省</th><th>购买次数</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div id="pass-purchases-block" hidden>
+          <h3>逐次购买明细</h3>
+          <div class="table-wrap">
+            <table id="pass-purchases-table">
+              <thead>
+                <tr>
+                  <th>卡号</th><th>#</th><th>购买运营日</th><th>通票</th>
+                  <th>价格（元）</th><th>有效天数</th><th>覆盖运营日起止</th>
+                  <th>覆盖行程数</th><th>覆盖行程按次合计（元）</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 账单争议更正预演 -->
+    <section class="card" id="sec-dispute">
+      <h2>15. 账单争议更正预演</h2>
+      <p class="hint">针对<strong>已保存</strong>刷卡记录与<strong>最近一次核验账单</strong>（第 7 区）：
+        按第 5 区的<strong>原始行号</strong>选择同一卡的 <strong>1～2 笔</strong>记录，
+        仅可临时修改<strong>时刻</strong>或<strong>站点</strong>（每项留空表示不修改）。
+        后端在内存中原子替换后，对该卡全部记录重新排序、配对与计价，
+        以<strong>「进站行号 → 出站行号」对</strong>为行程标识对比当前账单与更正方案，
+        列出新增、移除及金额 / 运营日 / 优惠变化，并汇总该卡应<strong>补收</strong>或
+        <strong>退款</strong>的金额。预演<strong>全程只读</strong>：不写回记录、配置或账单；
+        更正后若出现配对、未知站点或缺票价错误，将返回原有定位错误且不产出差额。</p>
+      <div class="dispute-edits">
+        <div class="dispute-edit">
+          <span class="dispute-edit-tag">更正 1</span>
+          <label>原始行号（第 5 区「来源行」）
+            <input type="number" id="dispute-line-1" min="1" step="1" placeholder="如 3" />
+          </label>
+          <label>新时刻（留空表示不改时刻）
+            <input type="text" id="dispute-time-1" placeholder="2026-09-18 08:00:00" />
+          </label>
+          <label>新站点（留空表示不改站点）
+            <input type="text" id="dispute-station-1" placeholder="科技园" />
+          </label>
+        </div>
+        <div class="dispute-edit">
+          <span class="dispute-edit-tag">更正 2（可选）</span>
+          <label>原始行号
+            <input type="number" id="dispute-line-2" min="1" step="1" />
+          </label>
+          <label>新时刻（留空表示不改时刻）
+            <input type="text" id="dispute-time-2" />
+          </label>
+          <label>新站点（留空表示不改站点）
+            <input type="text" id="dispute-station-2" />
+          </label>
+        </div>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-dispute" type="button">🧾 运行更正预演</button>
+        <button class="btn btn-ghost" id="btn-dispute-copy" type="button" hidden>📋 复制争议摘要</button>
+        <span id="dispute-status" class="status"></span>
+      </div>
+
+      <div id="dispute-errors" class="errors-panel" hidden>
+        <h3>❌ 无法生成更正预演 —— 请处理以下问题（记录、配置与账单均未改动）</h3>
+        <ul id="dispute-errors-list"></ul>
+      </div>
+
+      <div id="dispute-result" class="audit-result" hidden>
+        <div id="dispute-summary" class="audit-summary"></div>
+        <div class="table-wrap">
+          <table id="dispute-table">
+            <thead>
+              <tr>
+                <th>行程标识（进→出 行号）</th><th>状态</th>
+                <th>行程（当前账单）</th><th>行程（更正方案）</th>
+                <th>运营日（当前）</th><th>运营日（更正）</th>
+                <th>优惠（当前）</th><th>优惠（更正）</th>
+                <th>实扣（当前）</th><th>实扣（更正）</th><th>实扣差额</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 服务中断补偿预览 -->
+    <section class="card" id="sec-compensation">
+      <h2>16. 服务中断补偿预览</h2>
+      <p class="hint">基于<strong>最近一次核验生成的账单</strong>（第 7 区）预览服务中断补偿：
+        输入中断<strong>站点</strong>、<strong>起止时刻</strong>（闭区间）、<strong>补偿预算</strong>与
+        <strong>单卡上限</strong>（金额单位：元，计算时按分取整）。系统选出<strong>进站或出站</strong>
+        发生在该站、且对应刷卡时刻落在闭区间内的行程，按卡汇总实扣额；先以各卡实扣额为
+        <strong>权重</strong>按比例分配预算，再将超过 <code>min(单卡上限, 该卡实扣额)</code> 的份额
+        <strong>封顶</strong>并向未封顶卡<strong>重新分配</strong>；每轮按<strong>最大余数</strong>补齐整数分
+        （余数相同按卡号排序），直到预算用尽或全部封顶。预览<strong>全程只读</strong>：
+        不修改记录、配置或账单；无匹配账单时返回空结果。</p>
+      <div class="form-grid">
+        <label>中断站点
+          <input type="text" id="comp-station" placeholder="科技园" />
+        </label>
+        <label>开始时刻（含）
+          <input type="text" id="comp-start" placeholder="2026-09-18 08:00:00" />
+        </label>
+        <label>结束时刻（含）
+          <input type="text" id="comp-end" placeholder="2026-09-18 09:00:00" />
+        </label>
+        <label>补偿预算（元）
+          <input type="number" id="comp-budget" min="0" step="0.01" value="12.00" />
+        </label>
+        <label>单卡上限（元）
+          <input type="number" id="comp-cap" min="0" step="0.01" value="2.00" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-comp" type="button">💸 生成补偿预览</button>
+        <span id="comp-status" class="status"></span>
+      </div>
+
+      <div id="comp-errors" class="errors-panel" hidden>
+        <h3>❌ 无法生成补偿预览 —— 请修正以下参数（记录、配置与账单均未改动）</h3>
+        <ul id="comp-errors-list"></ul>
+      </div>
+
+      <div id="comp-result" class="audit-result" hidden>
+        <div id="comp-summary" class="audit-summary"></div>
+        <div class="table-wrap">
+          <table id="comp-table">
+            <thead>
+              <tr>
+                <th>卡号</th><th>受影响行程数</th><th>实扣额（元）</th>
+                <th>补偿额（元）</th><th>未补偿（元）</th><th>有效上限（元）</th>
+                <th>封顶状态</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      FastAPI + SQLite + 原生前端 · 数据保存在容器 /data 卷 ·
+      <a href="/docs" target="_blank">API 文档</a>
+    </footer>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
