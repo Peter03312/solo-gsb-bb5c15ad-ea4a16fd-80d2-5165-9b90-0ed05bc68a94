@@ -9,6 +9,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from . import db
 from .core import (
@@ -685,6 +686,39 @@ def run_compensation_preview(body: CompensationPreviewIn):
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 数据库备份下载（只读：在线一致性快照，不改业务数据）
+# ---------------------------------------------------------------------------
+
+def _cleanup_backup_file(tmp_path: str) -> None:
+    """响应结束（或发送失败）后删除备份临时文件。"""
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+
+
+@app.get("/api/backup")
+def download_backup():
+    """下载数据库一致性快照（SQLite 在线备份 API）。
+
+    - 快照覆盖站点分区、票价矩阵、刷卡记录、规则参数（meta）与最近账单；
+    - 备份期间并发写入不影响结果：快照严格对应某一个完整提交点，
+      不直接复制正在使用的数据库文件；
+    - 快照先写入临时文件并通过完整性检查后才提供下载，响应结束或
+      失败后由后台任务清理临时文件；
+    - 全程只读：源连接以只读模式打开，不修改任何业务数据。
+    """
+    tmp_path = db.create_backup_snapshot()
+    filename = "bus-backup-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".db"
+    return FileResponse(
+        tmp_path,
+        media_type="application/octet-stream",
+        filename=filename,
+        background=BackgroundTask(_cleanup_backup_file, tmp_path),
+    )
 
 
 # ---------------------------------------------------------------------------

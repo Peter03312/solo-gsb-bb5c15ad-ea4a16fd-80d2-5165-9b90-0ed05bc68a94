@@ -118,6 +118,8 @@ textarea {
   border: 1px solid transparent;
   cursor: pointer;
   transition: background .15s, border-color .15s;
+  display: inline-block;
+  text-decoration: none;
 }
 .btn:active { transform: translateY(1px); }
 .btn-primary { background: var(--primary); color: #fff; }

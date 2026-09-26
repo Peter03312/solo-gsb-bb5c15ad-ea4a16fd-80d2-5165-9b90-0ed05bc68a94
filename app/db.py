@@ -2,11 +2,13 @@
 
 同步驱动 sqlite3，每请求一个连接。金额以整数分存储，
 刷卡时刻以 'YYYY-MM-DD HH:MM:SS' 文本存储（可直接排序）。
+备份走 SQLite 在线备份 API：先落临时文件、通过完整性检查后再提供下载。
 """
 from __future__ import annotations
 
 import os
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterator, Optional
@@ -269,3 +271,58 @@ def list_bills(conn: sqlite3.Connection) -> list[dict]:
             "entry_line": r["entry_line"], "exit_line": r["exit_line"],
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# 数据库备份（在线快照，只读）
+# ---------------------------------------------------------------------------
+
+# 快照必须覆盖的数据表：配置(meta)、站点、票价、刷卡记录与最近账单
+BACKUP_REQUIRED_TABLES = ("meta", "station", "fare", "swipe", "trip_bill")
+
+
+def create_backup_snapshot(db_path: Optional[str] = None) -> str:
+    """生成数据库一致性快照，返回临时文件路径（调用方负责删除）。
+
+    - 使用 SQLite 在线备份 API（Connection.backup）：备份期间即使有其他
+      连接并发写入，快照也严格对应某一个完整提交点；绝不直接复制正在
+      使用的数据库文件（直接复制可能拿到写了一半的页面）；
+    - 源连接以只读模式（mode=ro）打开，备份流程不修改任何业务数据；
+    - 快照先写入临时文件，通过 PRAGMA integrity_check 与必备表核对后
+      才返回路径；任一步失败都会清理临时文件并抛出异常。
+    """
+    path = db_path or DB_PATH
+    fd, tmp_path = tempfile.mkstemp(prefix="bus-backup-", suffix=".db")
+    os.close(fd)
+    try:
+        src = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            dst = sqlite3.connect(tmp_path)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+
+        check = sqlite3.connect(tmp_path)
+        try:
+            rows = check.execute("PRAGMA integrity_check").fetchall()
+            if not (len(rows) == 1 and rows[0][0] == "ok"):
+                raise RuntimeError("备份快照完整性检查未通过")
+            tables = {r[0] for r in check.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            missing = [t for t in BACKUP_REQUIRED_TABLES if t not in tables]
+            if missing:
+                raise RuntimeError(
+                    "备份快照缺少数据表：" + ", ".join(missing))
+        finally:
+            check.close()
+    except Exception:
+        # 失败时不留下半成品临时文件
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return tmp_path
