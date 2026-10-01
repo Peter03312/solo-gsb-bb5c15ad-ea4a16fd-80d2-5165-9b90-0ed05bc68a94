@@ -7,15 +7,20 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterator, Optional
+from urllib.parse import quote
 
 from .core import Config, Fare, Station, Swipe
 
 DB_PATH = os.environ.get("DB_PATH", "/data/bus.db")
 
 TIME_FMT = "%Y-%m-%d %H:%M:%S"
+
+# 备份必须覆盖的业务表（站点/票价/刷卡记录/配置/账单）
+_BACKUP_TABLES = ("meta", "station", "fare", "swipe", "trip_bill")
 
 
 def _ensure_parent(path: str) -> None:
@@ -269,3 +274,80 @@ def list_bills(conn: sqlite3.Connection) -> list[dict]:
             "entry_line": r["entry_line"], "exit_line": r["exit_line"],
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# 在线备份（只读：不改业务数据）
+# ---------------------------------------------------------------------------
+
+def create_backup_snapshot(db_path: Optional[str] = None) -> str:
+    """生成数据库的一致性快照，返回快照临时文件路径。
+
+    使用 SQLite 在线备份 API（``Connection.backup``）而非直接复制正在使用
+    的数据库文件：源连接以只读 URI 打开并先固定一个读事务（取某一完整提交
+    点的快照），备份页面对并发写入安全，下载文件必然对应某个已提交状态，
+    不会出现跨事务的撕裂页 / 半成品写入。
+
+    快照先写入与数据库同目录的临时文件，完成后做完整性检查
+    （``PRAGMA integrity_check``、业务表齐全、各表行数与源快照一致），
+    任一检查失败则删除临时文件并抛出异常。全程只读，不修改业务数据。
+    调用方负责在响应结束后删除返回的临时文件。
+    """
+    src_path = os.path.abspath(db_path or DB_PATH)
+    _ensure_parent(src_path)
+    tmp_dir = os.path.dirname(src_path)
+
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".backup-", suffix=".db", dir=tmp_dir)
+    os.close(fd)
+    os.unlink(tmp_path)  # 备份目标需要一个尚不存在的文件路径
+
+    src = None
+    dst = None
+    ok = False
+    try:
+        # mode=ro：源连接只读，备份流程不可能改动业务库
+        src_uri = "file:%s?mode=ro" % quote(src_path, safe="/")
+        src = sqlite3.connect(src_uri, uri=True, timeout=30)
+        dst = sqlite3.connect(tmp_path, timeout=30)
+
+        # 固定一个读事务：后续行数统计与备份页面都对应同一完整提交点，
+        # 即使备份期间有并发写入，快照与校验口径仍然一致。
+        src.execute("BEGIN")
+        src.execute("SELECT 1 FROM sqlite_master").fetchall()
+
+        src.backup(dst, pages=-1)
+
+        # 完整性检查：快照必须可打开、结构未损坏
+        check = dst.execute("PRAGMA integrity_check").fetchone()
+        if not check or check[0] != "ok":
+            raise sqlite3.DatabaseError(
+                "backup integrity_check failed: %r"
+                % (check[0] if check else None))
+
+        # 业务表齐全 + 行数与源快照一致（覆盖站点、票价、刷卡记录、
+        # 配置 meta 及最近账单 trip_bill）
+        for table in _BACKUP_TABLES:
+            src_n = src.execute(
+                "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
+            dst_n = dst.execute(
+                "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
+            if src_n != dst_n:
+                raise sqlite3.DatabaseError(
+                    "backup row count mismatch for table %s: %d != %d"
+                    % (table, dst_n, src_n))
+
+        ok = True
+        return tmp_path
+    finally:
+        try:
+            if dst is not None:
+                dst.close()
+        finally:
+            if src is not None:
+                src.close()
+            if not ok:
+                try:
+                    os.unlink(tmp_path)
+                except FileNotFoundError:
+                    pass

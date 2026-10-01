@@ -1,6 +1,7 @@
 """FastAPI 入口：API + 原生静态页面。"""
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -45,6 +46,32 @@ from .schemas import (
 )
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+logger = logging.getLogger("bus-fare-checker")
+
+
+class _BackupFileResponse(FileResponse):
+    """文件发送结束（含客户端中断）后删除快照临时文件。
+
+    包装父类 ``__call__`` 的收尾路径，不依赖后台任务
+    （客户端中途断开时 BackgroundTask 不保证执行），
+    也不依赖具体 Starlette 版本的 FileResponse 内部方法。
+    """
+
+    def __init__(self, path: str, *args, **kwargs):
+        super().__init__(path, *args, **kwargs)
+        self._tmp_path = path
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                os.unlink(self._tmp_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.exception("清理备份临时文件失败: %s", self._tmp_path)
 
 
 @asynccontextmanager
@@ -680,6 +707,40 @@ def run_compensation_preview(body: CompensationPreviewIn):
         "round_count": result.round_count,
         "cards": result.cards,
     }
+
+
+@app.get("/api/backup")
+def download_backup():
+    """下载运行中数据库的一致性快照（只读，不改业务数据）。
+
+    - 通过 SQLite 在线备份 API 生成快照，对应某一完整提交点，
+      即使备份期间有并发写入也不会得到撕裂文件，不直接复制正在使用的库；
+    - 快照先写入临时文件，完成 integrity_check / 表齐全 / 行数一致
+      检查后才作为文件下载；
+    - 响应结束（含客户端中断）或快照失败后清理临时文件，失败返回 500。
+    """
+    try:
+        tmp_path = db.create_backup_snapshot()
+        try:
+            return _BackupFileResponse(
+                tmp_path,
+                media_type="application/vnd.sqlite3",
+                filename="bus-backup-%s.db"
+                         % datetime.now().strftime("%Y%m%d-%H%M%S"),
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception:
+            # 响应对象构造失败（如文件 stat 异常）时也不残留临时文件
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("生成数据库备份快照失败")
+        raise HTTPException(status_code=500, detail="backup failed")
 
 
 @app.get("/api/health")
